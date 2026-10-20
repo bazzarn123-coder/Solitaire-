@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -120,7 +119,7 @@
             padding: 8px 14px; background: rgba(0, 0, 0, 0.25);
             font-size: 0.85rem; font-weight: 600; border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         }
-        .header-actions { display: flex; gap: 8px; }
+        .header-actions { display: flex; gap: 8px; align-items: center; }
         .stat-item { display: flex; flex-direction: column; align-items: center; }
         .stat-label { font-size: 0.6rem; text-transform: uppercase; color: #a3c1ad; }
         .icon-btn {
@@ -132,6 +131,21 @@
         .icon-btn:disabled {
             opacity: 0.4;
             cursor: not-allowed;
+        }
+        .autocomplete-btn {
+            background: linear-gradient(135deg, #ffd700 0%, #ff8c00 100%);
+            color: #113328;
+            font-weight: 800;
+            padding: 0 10px;
+            border-radius: 17px;
+            width: auto;
+            font-size: 0.75rem;
+            animation: pulse-glow 1.5s infinite;
+        }
+        @keyframes pulse-glow {
+            0% { box-shadow: 0 0 0 0 rgba(255, 215, 0, 0.7); }
+            70% { box-shadow: 0 0 0 8px rgba(255, 215, 0, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 215, 0, 0); }
         }
 
         /* GAME BOARD CONTAINER */
@@ -164,7 +178,14 @@
             display: flex; flex-direction: column; justify-content: space-between;
             padding: 3px; font-size: calc(var(--card-width) * 0.22); font-weight: bold;
             transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); cursor: pointer;
+            touch-action: none;
             overflow: hidden;
+        }
+        .card.dragging {
+            z-index: 9999 !important;
+            opacity: 0.9;
+            box-shadow: 0 12px 25px rgba(0,0,0,0.5);
+            transition: none !important;
         }
         .card.red { color: #d32f2f; }
         .card.black { color: #212121; }
@@ -320,6 +341,7 @@
         <div class="stat-item"><span class="stat-label">Time</span><span id="timer-val">00:00</span></div>
         <div class="stat-item"><span class="stat-label">Moves</span><span id="moves-val">0</span></div>
         <div class="header-actions">
+            <button class="icon-btn autocomplete-btn" id="auto-complete-btn" title="Auto Complete" style="display: none;">⚡ Auto</button>
             <button class="icon-btn" id="undo-btn" title="Undo" disabled>↩️</button>
             <button class="icon-btn" id="restart-btn" title="Restart">🔄</button>
         </div>
@@ -418,6 +440,7 @@
         document.getElementById('restart-btn').addEventListener('click', startGame);
         document.getElementById('undo-btn').addEventListener('click', undoMove);
         document.getElementById('win-canvas').addEventListener('click', showWinMenu);
+        document.getElementById('auto-complete-btn').addEventListener('click', triggerAutoComplete);
 
         function saveState() {
             const snapPiles = gameState.piles.map(pile => 
@@ -440,6 +463,7 @@
             playSound('card');
             renderBoard();
             updateUndoButton();
+            checkAutoCompleteStatus();
         }
 
         function updateUndoButton() {
@@ -451,6 +475,7 @@
             stopWinAnimation();
             document.getElementById('splash-screen').classList.add('hidden');
             document.getElementById('win-overlay').classList.remove('show');
+            document.getElementById('auto-complete-btn').style.display = 'none';
             gameState.won = false;
             gameState.history = [];
             updateUndoButton();
@@ -637,11 +662,13 @@
                 for (let i = 0; i < 10; i++) tContainer.appendChild(createPileElement(i, 'Tableau'));
                 bottomRow.appendChild(tContainer);
             }
+            checkAutoCompleteStatus();
         }
 
         function createPileElement(pileIndex, type) {
             const pileDiv = document.createElement('div');
             pileDiv.className = 'pile';
+            pileDiv.dataset.pileIndex = pileIndex;
             const cards = gameState.piles[pileIndex];
             
             if (type === 'Stock' && cards.length === 0 && gameState.mode !== 'yukon') {
@@ -672,8 +699,12 @@
                                         <div class="card-bottom"><span class="card-val-text">${card.value}</span><span>${card.suit}</span></div>`;
                 }
 
+                // Click / Double Tap handler
                 cardEl.addEventListener('click', (e) => { 
-                    if (gameState.won) return;
+                    if (gameState.won || cardEl.dataset.wasDragged === 'true') {
+                        cardEl.dataset.wasDragged = 'false';
+                        return;
+                    }
                     e.stopPropagation(); 
                     let now = Date.now();
                     let last = parseInt(cardEl.dataset.lastClick || 0);
@@ -689,11 +720,90 @@
                         handleCardClick(pileIndex, cardIdx); 
                     }
                 });
+
+                // Touch & Slide (Drag and Drop) implementation
+                if (card.faceUp) {
+                    initCardDrag(cardEl, pileIndex, cardIdx);
+                }
+
                 pileDiv.appendChild(cardEl);
             });
 
             pileDiv.addEventListener('click', () => { if(!gameState.won) handlePileClick(pileIndex); });
             return pileDiv;
+        }
+
+        function initCardDrag(cardEl, pileIndex, cardIdx) {
+            let startX = 0, startY = 0, origX = 0, origY = 0;
+            let isDragging = false;
+
+            const onPointerDown = (e) => {
+                if (gameState.won) return;
+                isDragging = false;
+                startX = e.clientX || (e.touches ? e.touches[0].clientX : 0);
+                startY = e.clientY || (e.touches ? e.touches[0].clientY : 0);
+                
+                const rect = cardEl.getBoundingClientRect();
+                origX = rect.left;
+                origY = rect.top;
+
+                window.addEventListener('pointermove', onPointerMove);
+                window.addEventListener('pointerup', onPointerUp);
+                window.addEventListener('touchmove', onPointerMove, { passive: false });
+                window.addEventListener('touchend', onPointerUp);
+            };
+
+            const onPointerMove = (e) => {
+                const clientX = e.clientX || (e.touches ? e.touches[0].clientX : 0);
+                const clientY = e.clientY || (e.touches ? e.touches[0].clientY : 0);
+                const dx = clientX - startX;
+                const dy = clientY - startY;
+
+                if (!isDragging && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+                    isDragging = true;
+                    cardEl.classList.add('dragging');
+                    cardEl.dataset.wasDragged = 'true';
+                }
+
+                if (isDragging) {
+                    e.preventDefault();
+                    cardEl.style.transform = `translate(${dx}px, ${dy}px)`;
+                }
+            };
+
+            const onPointerUp = (e) => {
+                window.removeEventListener('pointermove', onPointerMove);
+                window.removeEventListener('pointerup', onPointerUp);
+                window.removeEventListener('touchmove', onPointerMove);
+                window.removeEventListener('touchend', onPointerUp);
+
+                if (!isDragging) return;
+
+                cardEl.classList.remove('dragging');
+                cardEl.style.transform = '';
+
+                // Find drop target under final coordinates
+                const clientX = e.clientX || (e.changedTouches ? e.changedTouches[0].clientX : 0);
+                const clientY = e.clientY || (e.changedTouches ? e.changedTouches[0].clientY : 0);
+                
+                cardEl.style.display = 'none';
+                const elemBelow = document.elementFromPoint(clientX, clientY);
+                cardEl.style.display = '';
+
+                let targetPileEl = elemBelow ? elemBelow.closest('.pile') : null;
+                if (targetPileEl) {
+                    let targetPileIndex = parseInt(targetPileEl.dataset.pileIndex);
+                    if (tryMoveCards(pileIndex, cardIdx, targetPileIndex)) {
+                        gameState.selectedCardInfo = null;
+                        document.querySelectorAll('.pile').forEach(p => p.classList.remove('highlight'));
+                        renderBoard();
+                        checkWinCondition();
+                    }
+                }
+            };
+
+            cardEl.addEventListener('pointerdown', onPointerDown);
+            cardEl.addEventListener('touchstart', onPointerDown, { passive: true });
         }
 
         function handleCardClick(pileIndex, cardIdx) {
@@ -847,6 +957,72 @@
             return false;
         }
 
+        function checkAutoCompleteStatus() {
+            if (gameState.won) return;
+            let available = false;
+
+            if (gameState.mode.startsWith('klondike') || gameState.mode === 'yukon') {
+                // Hand/Stock must be fully used (stock is empty) and all tableau/waste cards must be face up
+                let stockEmpty = (gameState.mode === 'yukon') || (gameState.piles[4].length === 0);
+                if (stockEmpty) {
+                    let allFaceUp = true;
+                    for (let i = 6; i <= 12; i++) {
+                        if (gameState.piles[i].some(c => !c.faceUp)) { allFaceUp = false; break; }
+                    }
+                    if (allFaceUp) available = true;
+                }
+            } else if (gameState.mode === 'freecell') {
+                // FreeCell: all cards out of stock (all tableau cards are always face up)
+                available = true;
+            }
+
+            const btn = document.getElementById('auto-complete-btn');
+            if (available) {
+                btn.style.display = 'flex';
+            } else {
+                btn.style.display = 'none';
+            }
+        }
+
+        function triggerAutoComplete() {
+            if (gameState.won) return;
+            document.getElementById('auto-complete-btn').style.display = 'none';
+            saveState();
+
+            // Sequentially auto-move cards to foundation home piles one at a time
+            let interval = setInterval(() => {
+                let moved = false;
+                let sourcePiles = gameState.mode === 'freecell' ? [4,5,6,7,8,9,10,11,12,13,14,15] : [5,6,7,8,9,10,11,12];
+                let foundations = gameState.mode === 'freecell' ? [4,5,6,7] : [0,1,2,3];
+
+                for (let pIdx of sourcePiles) {
+                    let pile = gameState.piles[pIdx];
+                    if (pile.length === 0) continue;
+                    let cardIdx = pile.length - 1;
+                    let card = pile[cardIdx];
+
+                    for (let fIdx of foundations) {
+                        if (checkValidMove(pIdx, cardIdx, fIdx)) {
+                            let movingCards = gameState.piles[pIdx].splice(cardIdx, 1);
+                            gameState.piles[fIdx].push(...movingCards);
+                            gameState.moves++;
+                            document.getElementById('moves-val').innerText = gameState.moves;
+                            playSound('card');
+                            renderBoard();
+                            moved = true;
+                            break;
+                        }
+                    }
+                    if (moved) break;
+                }
+
+                checkWinCondition();
+                if (gameState.won || !moved) {
+                    clearInterval(interval);
+                }
+            }, 120);
+        }
+
         function checkWinCondition() {
             if (gameState.won) return;
             let won = false;
@@ -866,6 +1042,7 @@
 
             if (won) {
                 gameState.won = true;
+                document.getElementById('auto-complete-btn').style.display = 'none';
                 updateUndoButton();
                 clearInterval(gameState.timerInterval); 
                 playSound('win');
@@ -967,4 +1144,3 @@
     </script>
 </body>
 </html>
-Bazzarn
